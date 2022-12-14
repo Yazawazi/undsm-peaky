@@ -1,7 +1,9 @@
-use clap::Parser;
+use aes::cipher::block_padding::Pkcs7;
+use cbc::cipher::{BlockDecryptMut, BlockEncryptMut, KeyIvInit};
+use clap::{ArgGroup, Parser};
 use std::fs;
 use std::fs::File;
-use std::io::{Read, Write};
+use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::PathBuf;
 use std::process::exit;
 
@@ -14,7 +16,12 @@ const IV: [u8; 16] = [
 ];
 
 #[derive(Parser, Debug)]
-#[clap(version, name = "unhaha")]
+#[clap(version, name = "undsm")]
+#[clap(group(
+ArgGroup::new("tokens")
+    .required(true)
+    .args(& ["unpack", "pack"]) // conflict
+))]
 struct Options {
     /// Unpack a .dsm file
     #[arg(short = 'u', long = "unpack")]
@@ -30,18 +37,11 @@ struct Options {
     input: PathBuf,
     /// Output file
     #[arg(short = 'o', long = "output")]
-    output: PathBuf,
+    output: Option<PathBuf>,
 }
 
-fn decrypt_aes_cbc(key: &[u8], iv: &[u8; 16], data: &mut [u8]) {
-    let mut ase256cbc = crypto2::blockmode::Aes256Cbc::new(key);
-    ase256cbc.decrypt(iv, data)
-}
-
-fn encrypt_aes_cbc(key: &[u8], iv: &[u8; 16], data: &mut [u8]) {
-    let mut ase256cbc = crypto2::blockmode::Aes256Cbc::new(key);
-    ase256cbc.encrypt(iv, data)
-}
+type Aes256CbcDec = cbc::Decryptor<aes::Aes256>;
+type Aes256CbcEnc = cbc::Encryptor<aes::Aes256>;
 
 fn unpack(input: &PathBuf, output: &PathBuf) {
     println!(
@@ -50,8 +50,9 @@ fn unpack(input: &PathBuf, output: &PathBuf) {
         output.to_string_lossy()
     );
     let input_file = File::open(input).unwrap();
-    let input_file_content_string = String::from_utf8_lossy(
-        &input_file
+    let buf_reader = BufReader::new(input_file);
+    let base64_encoded = String::from_utf8_lossy(
+        &buf_reader
             .bytes()
             .map(|b| b.unwrap())
             .filter(|b| {
@@ -60,10 +61,12 @@ fn unpack(input: &PathBuf, output: &PathBuf) {
             .collect::<Vec<u8>>(),
     )
     .to_string();
-    let mut input_file_base64_array = base64::decode(&input_file_content_string).unwrap();
-    decrypt_aes_cbc(&KEY, &IV, &mut input_file_base64_array);
-    let mut output_file = File::create(output).unwrap();
-    output_file.write_all(&*input_file_base64_array).unwrap();
+    let mut vec = base64::decode(&base64_encoded).unwrap();
+    let aes = Aes256CbcDec::new_from_slices(&KEY, &IV).unwrap();
+    let result = aes.decrypt_padded_mut::<Pkcs7>(&mut *vec).unwrap();
+    let output_file = File::create(output).unwrap();
+    let mut buf_writer = BufWriter::new(output_file);
+    buf_writer.write_all(result).unwrap();
 }
 
 fn pack(input: &PathBuf, output: &PathBuf) {
@@ -73,29 +76,18 @@ fn pack(input: &PathBuf, output: &PathBuf) {
         output.to_string_lossy()
     );
     let input_file = File::open(input).unwrap();
-    let mut input_file_array = input_file.bytes().map(|b| b.unwrap()).collect::<Vec<u8>>();
-    encrypt_aes_cbc(&KEY, &IV, &mut input_file_array);
-    let result_base64 = base64::encode(&input_file_array);
-    let mut output_file = File::create(output).unwrap();
-    output_file.write_all(&*result_base64.as_bytes()).unwrap();
+    let buf_reader = BufReader::new(input_file);
+    let vec = buf_reader.bytes().map(|b| b.unwrap()).collect::<Vec<u8>>();
+    let aes = Aes256CbcEnc::new_from_slices(&KEY, &IV).unwrap();
+    let result = aes.encrypt_padded_vec_mut::<Pkcs7>(&*vec);
+    let result_base64 = base64::encode(&result);
+    let output_file = File::create(output).unwrap();
+    let mut buf_writer = BufWriter::new(output_file);
+    buf_writer.write_all(&*result_base64.as_bytes()).unwrap();
 }
 
 fn main() {
     let args = Options::parse();
-
-    if args.unpack == args.pack {
-        println!("You must specify either -u or -p");
-        exit(1);
-    }
-
-    if args.output.exists() {
-        if !args.force {
-            eprintln!("Output file already exists, use -f to overwrite");
-            exit(1);
-        } else {
-            fs::remove_file(&args.output).unwrap();
-        }
-    }
 
     if !args.input.exists() {
         eprintln!("Input file does not exist");
@@ -107,9 +99,26 @@ fn main() {
         exit(1);
     }
 
+    let output = args.output.unwrap_or_else(|| {
+        args.input.parent().unwrap().join(format!(
+            "{}-{suffix}.txt",
+            args.input.file_stem().unwrap().to_string_lossy(),
+            suffix = if args.unpack { "unpack" } else { "pack" }
+        ))
+    });
+
+    if output.exists() {
+        if !args.force {
+            eprintln!("Output file already exists, use -f to overwrite");
+            exit(1);
+        } else {
+            fs::remove_file(&output).unwrap();
+        }
+    }
+
     if args.unpack {
-        unpack(&args.input, &args.output);
+        unpack(&args.input, &output);
     } else {
-        pack(&args.input, &args.output);
+        pack(&args.input, &output);
     }
 }

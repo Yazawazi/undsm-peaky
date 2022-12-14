@@ -10,15 +10,13 @@
 ## Build
 
 ```bash
-rustup update nightly
-cargo +nightly build --release
+cargo build --release
 ```
-> Note: You need change `crypto2-0.1.2\src\lib.rs` to build: remove `llvm_asm` feature.
 
 ## Usage
 
 ```text
-Usage: undsm [OPTIONS] --input <INPUT> --output <OUTPUT>
+Usage: undsm [OPTIONS] --input <INPUT> <--unpack|--pack>
 
 Options:
   -u, --unpack           Unpack a .dsm file
